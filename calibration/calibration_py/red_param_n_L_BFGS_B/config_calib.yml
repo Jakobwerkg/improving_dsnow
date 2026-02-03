@@ -1,0 +1,47 @@
+# ============================================================
+# Δ-SNOW Calibration Configuration File
+# ============================================================
+
+paths:
+  nc_file: "/Users/jakobwerkgarner/code/mt_dsnow/calibration/calibration_data/raw_data/dsnow/Win21_calib/Win21_all.nc"
+  r_script: "/Users/jakobwerkgarner/code/mt_dsnow/calibration/helpers/minimal_delta_snow_runner.R"
+  output_dir: "/Users/jakobwerkgarner/code/mt_dsnow/calibration/calibration_py/red_param_n_L_BFGS_B/python_calib_log"
+
+optimization:
+  maxiter: 25
+  PENALTY_WEIGHT: 0.00
+
+parameters:
+
+  # ------------------------------------------------------------
+  # PARAMETERS TO CALIBRATE (exact order)
+  # ------------------------------------------------------------
+  names: ["rho.null", "c.ov", "k.exp", "tau", "eta.null"]
+
+  initial:
+    - 100            # rho.null
+    - 0.0005000005   # c.ov
+    - 0.105          # k.exp
+    - 0.03           # tau
+    - 5000000.0      # eta.null
+
+  bounds:
+    - [70, 130]       # rho.null
+    - [1e-9, 0.001]   # c.ov
+    - [0.01, 0.2]     # k.exp
+    - [0.01, 0.06]    # tau
+    - [1e6, 2e7]      # eta.null
+
+  scale:
+    - 1000
+    - 0.001
+    - 0.1
+    - 0.1
+    - 1e7
+
+  # ------------------------------------------------------------
+  # PARAMETERS FIXED (will still be passed to Δ-SNOW R runner)
+  # ------------------------------------------------------------
+  fixed:
+    rho.max: 401
+    k.ov: 0.38

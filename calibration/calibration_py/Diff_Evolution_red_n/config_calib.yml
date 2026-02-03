@@ -1,0 +1,31 @@
+# Δ-SNOW Calibration Configuration File (UNSCALED)
+
+paths:
+  nc_file: "/Users/jakobwerkgarner/code/mt_dsnow/calibration/calibration_data/raw_data/dsnow/Win21_calib/Win21_all.nc"
+  r_script: "/Users/jakobwerkgarner/code/mt_dsnow/calibration/helpers/minimal_delta_snow_runner.R"
+  output_dir: "/Users/jakobwerkgarner/code/mt_dsnow/calibration/calibration_py/Diff_Evolution_red_n/python_calib_log"
+
+optimization:
+  maxiter: 10
+  maxiter_test: 2
+
+parameters:
+  names: ["rho.max", "rho.null", "c.ov", "k.exp"]
+
+      # UN-SCALED bounds (directly from R before dividing by par_scale)
+  bounds:
+    - [400, 500]      # rho.max
+    - [90, 110]       # rho.null
+    - [1e-9, 0.001]   # c.ov make sure not 0 but e-9 otherwise moedel blows ups (divison by 0)
+    - [0.01, 0.2]     # k.exp
+    #- [0.01, 0.06]     # tau
+
+
+  fixed:
+    k.ov : 0.38
+    eta.null: 8.5e6
+    tau: 0.000012
+
+
+  # SCALE FACTORS (EXACT ORDER FROM R's par_scale)
+  scale: [1000, 1000, 0.001, 0.1]

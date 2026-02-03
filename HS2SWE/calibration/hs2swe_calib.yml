@@ -1,0 +1,36 @@
+# HS2SWE Calibration Configuration File (UNSCALED)
+
+paths:
+  data_dir: "/Users/jakobwerkgarner/code/mt_dsnow/HS2SWE/data_prep/hs2swe_input"
+  output_dir: "/Users/jakobwerkgarner/code/mt_dsnow/HS2SWE/calibration_output"
+
+optimization:
+  maxiter: 10
+  PENALTY_WEIGHT: 0.01
+
+parameters:
+  # Parameter names used internally (we map them to HS2SWE below)
+  names: ["rho.max", "rho.null", "c.ov", "k.ov", "k.exp", "tau", "eta.null"]
+
+  # Unscaled initial values
+  initial:
+    - 425          # rho.max  -> RhoMax
+    - 100          # rho.null -> RhoNew
+    - 0.0005000005 # c.ov     -> c1
+    - 0.505        # k.ov     -> c2
+    - 0.105        # k.exp    -> c3
+    - 0.03         # tau      -> c4
+    - 5000000.0    # eta.null -> Visc
+
+  # Unscaled bounds
+  bounds:
+    - [350, 500]      # rho.max
+    - [70, 130]       # rho.null
+    - [1e-9, 0.001]   # c.ov
+    - [0.01, 1]       # k.ov
+    - [0.01, 0.2]     # k.exp
+    - [0.01, 0.06]    # tau
+    - [1e6, 2e7]      # eta.null
+
+  # Scale factors for optimizer (internal scaling)
+  scale: [1000, 1000, 0.001, 1, 0.1, 0.1, 1e7]
