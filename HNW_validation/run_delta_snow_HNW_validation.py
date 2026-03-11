@@ -25,6 +25,8 @@ import numpy as np
 from io import StringIO
 import tempfile
 import os
+from datetime import datetime
+
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
@@ -32,28 +34,21 @@ from matplotlib.colors import LogNorm
 # CONFIGURATION
 # =============================================================================
 
-
-
 PARAMS = {
-    "rho.max": 451.6977806582531,
-    "rho.null": 90.0,
-    "c.ov": 2.746976858091589e-0,
-    "k.ov": 0.38,
-    "k": 0.020385468323087456,
-    "tau":  0.000012,
-    "eta.null": 8.5e6
+    "rho.max": 401.0,       # kg m^-3
+    "rho.null": 81.0,       # kg m^-3
+    "c.ov": 5.1e-4,         # Pa^-1
+    "k.ov": 0.38,           # -
+    "k": 0.030,             # m^3 kg^-1
+    "tau": 0.024,           # m  (2.4 cm)
+    "eta.null": 8.5e6       # Pa s
 }
-
-
-
-
 
 BASE_DIR = Path("/Users/jakobwerkgarner/code/mt_dsnow")
 os.chdir(BASE_DIR)
 
 DATA_DIR = Path("HNW_validation/validation_input")
-
-OUT_DIR = Path('HNW_validation/validation_output')
+OUT_DIR = Path("HNW_validation/validation_output")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 R_BIN = "/usr/local/bin/Rscript"
@@ -72,30 +67,42 @@ STATIONS = [
     "San_Bernadino", "Maloja", "Sankt_Moritz", "Samnaun", "Zuoz"
 ]
 
-
-
-
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
-def load_input(csv_path: Path):
+def load_input(csv_path: Path) -> pd.DataFrame:
+    """Load one input CSV and standardize columns."""
     df = pd.read_csv(csv_path)
-    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+
+    if "date" not in df.columns:
+        raise ValueError(f"{csv_path} missing required column 'date'")
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    if df["date"].isna().any():
+        raise ValueError(f"{csv_path} contains invalid date values")
 
     if "HS" in df.columns:
         df = df.rename(columns={"HS": "HS_obs"})
     if "HNW" in df.columns:
         df = df.rename(columns={"HNW": "HNW_obs"})
 
+    df = df.sort_values("date").reset_index(drop=True)
+    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
+
     return df
 
 
-def run_r_model(csv_path: Path):
+def run_r_model(csv_path: Path) -> pd.DataFrame:
     """
-    Runs ΔSNOW R model. R cannot read stdin → we write a temporary file.
+    Runs ΔSNOW R model.
+    R cannot read stdin → write temporary CSV.
     """
     df = pd.read_csv(csv_path)
+
+    if "date" not in df.columns:
+        raise ValueError(f"{csv_path} missing required column 'date'")
 
     if "HS" in df.columns:
         hs_col = "HS"
@@ -104,45 +111,80 @@ def run_r_model(csv_path: Path):
     else:
         raise ValueError(f"{csv_path} missing HS or HS_obs")
 
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    if df["date"].isna().any():
+        raise ValueError(f"{csv_path} contains invalid date values")
+
+    df = df.sort_values("date").reset_index(drop=True)
+
     df_r = pd.DataFrame({
-        "date": df["date"],
+        "date": df["date"].dt.strftime("%Y-%m-%d"),
         "hs": df[hs_col]
     })
 
+    if df_r.empty:
+        raise ValueError(f"{csv_path} is empty")
+
+    # Force first value to zero as required by model a bit shit but keep it (until better option found)
     df_r.at[df_r.index[0], "hs"] = 0
 
-    # temporary CSV
     with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
         tmp_path = Path(tmp.name)
         df_r.to_csv(tmp_path, index=False)
 
-    # R command
     cmd = [R_BIN, str(R_RUNNER), "--in", str(tmp_path)]
     for k, v in PARAMS.items():
         cmd.extend([f"--{k}", str(v)])
 
-    # run process
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-
-    os.remove(tmp_path)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        if tmp_path.exists():
+            os.remove(tmp_path)
 
     if proc.returncode != 0:
+        print("\n[R STDOUT]")
         print(proc.stdout)
+        print("\n[R STDERR]")
         print(proc.stderr)
-        raise RuntimeError("R model failed.")
+        raise RuntimeError(f"R model failed for {csv_path}")
+
+    if not proc.stdout.strip():
+        raise RuntimeError(f"R model returned empty output for {csv_path}")
 
     df_out = pd.read_csv(StringIO(proc.stdout))
-    df_out["date"] = pd.to_datetime(df_out["date"]).dt.strftime("%Y-%m-%d")
+    df_out["date"] = pd.to_datetime(df_out["date"], errors="coerce")
 
-    return df_out.rename(columns={"hs": "hs_mod", "swe_mod": "SWE_mod"})
+    if df_out["date"].isna().any():
+        raise ValueError(f"R output contains invalid dates for {csv_path}")
 
+    df_out = df_out.sort_values("date").reset_index(drop=True)
+    df_out["date"] = df_out["date"].dt.strftime("%Y-%m-%d")
+
+    rename_map = {}
+    if "hs" in df_out.columns:
+        rename_map["hs"] = "HS_mod"
+    if "swe_mod" in df_out.columns:
+        rename_map["swe_mod"] = "SWE_mod"
+    elif "swe" in df_out.columns:
+        rename_map["swe"] = "SWE_mod"
+
+    df_out = df_out.rename(columns=rename_map)
+
+    required = ["date", "SWE_mod"]
+    missing = [c for c in required if c not in df_out.columns]
+    if missing:
+        raise ValueError(f"R output missing required columns {missing} for {csv_path}")
+
+    return df_out
 
 
 # =============================================================================
 # Data Processing
 # =============================================================================
 
-def process_all_stations():
+def process_all_stations() -> pd.DataFrame | None:
+    """Run model for all station-season files and compile merged dataset."""
     all_rows = []
 
     for station in STATIONS:
@@ -151,7 +193,7 @@ def process_all_stations():
 
         for yr in YEARS:
             in_csv = DATA_DIR / str(yr) / f"{station}.csv"
-            print(str(in_csv))
+            print(in_csv)
 
             if not in_csv.exists():
                 print(f"[SKIP] Missing {in_csv}")
@@ -159,48 +201,48 @@ def process_all_stations():
 
             print(f"[PROCESS] {station} {yr}")
 
-            df_in = load_input(in_csv)
-            df_r = run_r_model(in_csv)
+            try:
+                df_in = load_input(in_csv)
+                df_r = run_r_model(in_csv)
 
-            merged = df_in.merge(df_r, on="date", how="left")
-            merged["HNW_mod"] = merged["SWE_mod"].diff()
-            merged["station"] = station
-            merged["season"] = yr
+                merged = df_in.merge(df_r, on="date", how="left")
+                merged["date"] = pd.to_datetime(merged["date"])
+                merged = merged.sort_values("date").reset_index(drop=True)
 
-            out_path = OUT_DIR / f"{yr}_{station}_with_model.csv"
-            merged.to_csv(out_path, index=False)
-            print(f"  → saved: {out_path}")
+                # HNW from day-to-day SWE difference within this file only
+                merged["HNW_mod"] = merged["SWE_mod"].diff().clip(lower=0)
 
-            station_rows.append(merged)
-            all_rows.append(merged)
+                merged["station"] = station
+                merged["season"] = yr
 
-        # # Write per-station all seasons
-        # if station_rows:
-        #     st_all = pd.concat(station_rows, ignore_index=True)
-        #     st_out = OUT_DIR / f"{station}_all_seasons.csv"
-        #     st_all.to_csv(st_out, index=False)
-        #     print(f"[WRITE] all seasons for {station}")
+                merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
 
-        from datetime import datetime
-        from pathlib import Path
-        import pandas as pd
+                out_path = OUT_DIR / f"{yr}_{station}_with_model.csv"
+                merged.to_csv(out_path, index=False)
+                print(f"  → saved: {out_path}")
 
-        # global file
-        if all_rows:
-            all_df = pd.concat(all_rows, ignore_index=True)
+                station_rows.append(merged)
+                all_rows.append(merged)
 
-            # Create timestamp string
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            except Exception as e:
+                print(f"[ERROR] {station} {yr}: {e}")
+                continue
 
-            # Build full output path safely
-            all_out = OUT_DIR / f"{timestamp}_ALL_STATIONS_ALL_YEARS.csv"
+        # Optional per-station combined file
+        if station_rows:
+            st_all = pd.concat(station_rows, ignore_index=True)
+            st_out = OUT_DIR / f"{station}_all_seasons.csv"
+            st_all.to_csv(st_out, index=False)
+            print(f"[WRITE] all seasons for {station}: {st_out}")
 
-            all_df.to_csv(all_out, index=False)
-            print(f"[WRITE] full merged dataset: {all_out}")
-
-            return all_df
-    
-
+    # Write full merged dataset AFTER all stations are processed
+    if all_rows:
+        all_df = pd.concat(all_rows, ignore_index=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        all_out = OUT_DIR / f"{timestamp}_ALL_STATIONS_ALL_YEARS.csv"
+        all_df.to_csv(all_out, index=False)
+        print(f"[WRITE] full merged dataset: {all_out}")
+        return all_df
 
     return None
 
@@ -209,17 +251,32 @@ def process_all_stations():
 # Validation
 # =============================================================================
 
-def validate_swe(df):
+def validate_swe(df: pd.DataFrame) -> None:
     print("\n=== SWE VALIDATION ===\n")
 
     obs_col = "SWE"
-    df_valid = df[df[obs_col].notna()]
+    if obs_col not in df.columns:
+        print(f"Column '{obs_col}' not found — skipping SWE validation.")
+        return
+
+    if "SWE_mod" not in df.columns:
+        print("Column 'SWE_mod' not found — skipping SWE validation.")
+        return
+
+    df_valid = df.dropna(subset=[obs_col, "SWE_mod"]).copy()
+
+    if len(df_valid) == 0:
+        print("No valid SWE observations found — skipping SWE validation.")
+        return
 
     residuals = df_valid["SWE_mod"] - df_valid[obs_col]
 
     rmse = np.sqrt(np.mean(residuals**2))
     bias = np.mean(residuals)
-    rel_bias = np.mean(residuals / df_valid[obs_col]) * 100
+
+    # avoid division by zero in relative bias
+    nonzero = df_valid[obs_col] != 0
+    rel_bias = np.mean(residuals[nonzero] / df_valid.loc[nonzero, obs_col]) * 100 if nonzero.any() else np.nan
 
     corr = np.corrcoef(df_valid["SWE_mod"], df_valid[obs_col])[0, 1]
     r2 = corr**2
@@ -230,8 +287,7 @@ def validate_swe(df):
     print(f"Rel. Bias  = {rel_bias:.1f}%")
     print(f"R²         = {r2:.3f}")
 
-    # scatter plot
-    plt.figure(figsize=(7,7))
+    plt.figure(figsize=(7, 7))
     x = df_valid["SWE_mod"]
     y = df_valid[obs_col]
 
@@ -264,15 +320,20 @@ def validate_swe(df):
     plt.show()
 
 
-def validate_hnw(df):
+def validate_hnw(df: pd.DataFrame) -> None:
     print("\n=== HNW VALIDATION ===\n")
 
-    df_valid = df.dropna(subset=["HNW_obs", "HNW_mod"])
+    required = ["HNW_obs", "HNW_mod"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        print(f"Missing columns {missing} — skipping HNW validation.")
+        return
+
+    df_valid = df.dropna(subset=["HNW_obs", "HNW_mod"]).copy()
 
     # Keep only positive observed HNW
     df_valid = df_valid[df_valid["HNW_obs"] > 0]
 
-    # Safety check
     if len(df_valid) == 0:
         print("No valid HNW observations found — skipping HNW validation.")
         return
@@ -291,7 +352,7 @@ def validate_hnw(df):
 
     ss_res = np.sum((y - y_pred)**2)
     ss_tot = np.sum((y - np.mean(y))**2)
-    r2 = 1 - ss_res / ss_tot
+    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
 
     print(f"N = {len(df_valid)}")
     print(f"RMSE  = {rmse:.3f}")
@@ -299,9 +360,6 @@ def validate_hnw(df):
     print(f"PBIAS = {pbias:.2f}%")
     print(f"R²    = {r2:.3f}")
 
-    # ---------------------------------------------------------
-    # 2D Histogram Plot
-    # ---------------------------------------------------------
     plt.figure(figsize=(8, 7))
 
     plt.hist2d(
@@ -346,8 +404,9 @@ def validate_hnw(df):
 # Main
 # =============================================================================
 
-def main():
+def main() -> None:
     all_df = process_all_stations()
+
     if all_df is None:
         print("No data processed.")
         return

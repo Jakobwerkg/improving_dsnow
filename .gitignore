@@ -1,5 +1,36 @@
-# Ignore all CSV files
-*.csv
+# =========================
+# macOS
+# =========================
+.DS_Store
 
-# Ignore all NetCDF files
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# =========================
+# R
+# =========================
+.Rhistory
+.RData
+
+# =========================
+# Data files
+# =========================
+*.csv
 *.nc
+
+# =========================
+# Ignore pydeltasnow package copy
+# =========================
+model_diff/dsnow/pydeltasnow/
+
+# =========================
+# Build / coverage
+# =========================
+.coverage
+build/
+dist/
+*.egg-info/
