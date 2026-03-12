@@ -8,19 +8,62 @@
 # =========================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .ipynb_checkpoints/
+*.ipynb_checkpoints
 
 # =========================
 # R
 # =========================
 .Rhistory
 .RData
+.Rproj.user
+*.Rproj
+
+# =========================
+# Figures / plots
+# =========================
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+*.eps
+*.tif
+*.tiff
+*.gif
+*.bmp
+*.pgf
+*.fig
 
 # =========================
 # Data files
 # =========================
 *.csv
+*.tsv
+*.txt
 *.nc
+*.h5
+*.hdf5
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.rds
+*.RDS
+*.mat
+*.dat
+
+# =========================
+# Compressed data
+# =========================
+*.zip
+*.tar
+*.gz
+*.bz2
+*.xz
+*.7z
 
 # =========================
 # Ignore pydeltasnow package copy
@@ -34,3 +77,15 @@ model_diff/dsnow/pydeltasnow/
 build/
 dist/
 *.egg-info/
+.eggs/
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.temp

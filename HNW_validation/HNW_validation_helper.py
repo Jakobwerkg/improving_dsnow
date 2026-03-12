@@ -2,102 +2,68 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import os
+import pandas as pd
+import xarray as xr
 
 
-def validate_hnw(df,
-                 obs_col="HNW_obs",
-                 mod_col="HNW_mod",
-                 save_dir=None,
-                 filename="hnw_validation.png"):
+
+
+
+def _filter_season(df, full_season=False):
+    """Filter DataFrame to snow season (Nov 1 – Apr 30) unless full_season=True."""
+    
+    df = _set_datime_index(df)
+
+    if full_season:
+        return df.copy()
+    
+    else: 
+        mask = (df.index.month >= 11) | (df.index.month <= 4)
+        return df.loc[mask].copy()
+
+def _set_datime_index(df):
+    """Ensure DataFrame has a DatetimeIndex."""
+    
+    df.index = pd.to_datetime(df.time)
+    return df
+
+
+def _calculate_metrics(x, y):
     """
-    Validate modeled vs observed HNW and create a density scatter plot.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame containing observed and modeled HNW values.
-
-    obs_col : str, default="HNW_obs"
-        Column name of observed HNW values.
-
-    mod_col : str, default="HNW_mod"
-        Column name of modeled HNW values.
-
-    save_dir : str or None, optional
-        Directory where the plot should be saved. If None, the plot is only shown.
-
-    filename : str, default="hnw_validation.png"
-        Name of the saved figure file.
-
-    Returns
-    -------
-    dict
-        Dictionary containing validation metrics:
-        {
-            "N": number of samples,
-            "RMSE": root mean square error,
-            "Bias": mean bias,
-            "PBIAS": relative bias,
-            "R2": coefficient of determination
-        }
-
-    Notes
-    -----
-    - Rows with NaN or non-finite values are removed.
-    - Observations <= 0 are filtered out.
-    - The plot shows a 2D density histogram with a 1:1 reference line.
+    Calculate validation metrics.
+    x = observed
+    y = modeled
     """
 
-    # ---------------------------------------------------------
-    # DATA FILTERING
-    # ---------------------------------------------------------
-    df_valid = df.dropna(subset=[obs_col, mod_col])
-    df_valid = df_valid[df_valid[obs_col] >= 0]
-
-    df_valid = df_valid[
-        np.isfinite(df_valid[obs_col]) &
-        np.isfinite(df_valid[mod_col])
-    ]
-
-    y = df_valid[obs_col].values
-    x = df_valid[mod_col].values
-
-    # ---------------------------------------------------------
-    # METRICS
-    # ---------------------------------------------------------
-    residuals = x - y
+    residuals = y - x
 
     rmse = np.sqrt(np.mean(residuals**2))
     bias = np.mean(residuals)
-    pbias = np.sum(residuals) / np.sum(y)
+    pbias = np.sum(residuals) / np.sum(x) if np.sum(x) != 0 else np.nan
 
-    ss_res = np.sum((y - x)**2)
-    ss_tot = np.sum((y - np.mean(y))**2)
-    r2 = 1 - ss_res / ss_tot
+    ss_res = np.sum((x - y)**2)
+    ss_tot = np.sum((x - np.mean(x))**2)
+    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
 
-    stats = {
-        "N": len(df_valid),
+    return {
         "RMSE": rmse,
         "Bias": bias,
-        "PBIAS": pbias,
+        "Rel_BIAS": pbias,
         "R2": r2
     }
 
-    print(f"N        = {stats['N']}")
-    print(f"RMSE     = {stats['RMSE']:.3f}")
-    print(f"Bias     = {stats['Bias']:.3f}")
-    print(f"PBIAS    = {stats['PBIAS']:.2f}")
-    print(f"R²       = {stats['R2']:.3f}")
 
-    # ---------------------------------------------------------
-    # PLOT
-    # ---------------------------------------------------------
+def _plot_validation(x, y, stats, model_name, lim, xlabel, ylabel):
+    """
+    Generic validation density plot.
+    """
+
     plt.figure(figsize=(8, 7))
 
     plt.hist2d(
         x, y,
         bins=50,
-        range=[[0, 100], [0, 100]],
+        range=[lim, lim],
         norm=LogNorm(vmin=1, vmax=1000),
         cmap="jet"
     )
@@ -106,21 +72,21 @@ def validate_hnw(df,
     cb.set_ticks([1, 10, 100, 1000])
     cb.set_ticklabels(["1", "10", "100", ">999"])
 
-    lim = [0, 100]
     plt.plot(lim, lim, "--", color="gray", linewidth=1.3)
 
-    ticks = [0, 25, 50, 75, 100]
+    ticks = np.linspace(lim[0], lim[1], 5)
     plt.xticks(ticks)
     plt.yticks(ticks)
 
-    plt.xlabel("Modeled HNW (mm)")
-    plt.ylabel("Observed HNW (mm)")
-    plt.title("ΔSNOW", fontsize=15)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(model_name, fontsize=15)
 
     textstr = (
-        f"$R^2$: {r2:.2f}\n"
-        f"Rel. bias: {pbias:.2f}\n"
-        f"RMSE: {rmse:.1f}"
+        f"$R^2$: {stats['R2']:.2f}\n"
+        f"Bias: {stats['Bias']:.2f}\n"
+        f"RMSE: {stats['RMSE']:.1f}\n"
+        f"Rel_BIAS: {stats['Rel_BIAS']:.1%}\n"
     )
 
     plt.text(
@@ -133,12 +99,100 @@ def validate_hnw(df,
 
     plt.xlim(lim)
     plt.ylim(lim)
+
     plt.grid(False)
     plt.tight_layout()
 
-    # ---------------------------------------------------------
-    # SAVE (OPTIONAL)
-    # ---------------------------------------------------------
+
+def validate_hnw_mag25(df,
+                       model_name,
+                       obs_col="HNW_obs",
+                       mod_col="HNW_mod",
+                       save_dir=None,
+                       filename="hnw_validation.png",
+                       full_season=False):
+
+    df = _filter_season(df, full_season)
+
+    df_valid = df.dropna(subset=[obs_col, mod_col])
+
+    
+
+    # Caution greate differnce if it is >= 0 or > 0
+    df_valid = df_valid[df_valid[obs_col] >= 0]
+
+    df_valid = df_valid[
+        np.isfinite(df_valid[obs_col]) &
+        np.isfinite(df_valid[mod_col])
+    ]
+
+    x = df_valid[obs_col].values
+    y = df_valid[mod_col].values
+
+    stats = _calculate_metrics(x, y)
+    stats["N"] = len(df_valid)
+
+    print(stats)
+
+    _plot_validation(
+        x,
+        y,
+        stats,
+        model_name,
+        lim=[0, 100],
+        xlabel="Observed HNW (mm)",
+        ylabel="Modeled HNW (mm)"
+    )
+
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Plot saved to: {save_path}")
+
+    plt.show()
+
+    return stats
+
+
+def validate_swe_mag25(df,
+                       model_name,
+                       obs_col="SWE_obs",
+                       mod_col="SWE_mod",
+                       save_dir=None,
+                       filename="swe_validation.png",
+                       full_season=False):
+
+    df = _filter_season(df, full_season)
+
+    df_valid = df.dropna(subset=[obs_col, mod_col])
+    df_valid = df_valid[df_valid[obs_col] >= 0]
+
+    print(f"Number of valid observations after filtering: {len(df_valid)}")
+
+    df_valid = df_valid[
+        np.isfinite(df_valid[obs_col]) &
+        np.isfinite(df_valid[mod_col])
+    ]
+
+    x = df_valid[obs_col].values
+    y = df_valid[mod_col].values
+
+    stats = _calculate_metrics(x, y)
+    stats["N"] = len(df_valid)
+
+    print(stats)
+
+    _plot_validation(
+        x,
+        y,
+        stats,
+        model_name,
+        lim=[0, 1000],
+        xlabel="Observed SWE (mm)",
+        ylabel="Modeled SWE (mm)"
+    )
+
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, filename)
