@@ -29,6 +29,7 @@ SWE_SEASON_DIR = PLOT_DIR / "swe_by_season"
 SWE_SCATTER_DIR = PLOT_DIR / "swe_scatter"
 FIRST_APP_SUMMARY_DIR = PLOT_DIR / "first_appearance_summary"
 FIRST_APP_SEASON_DIR = PLOT_DIR / "first_appearance_by_season"
+FIRST_APP_ALL_STATIONS_DIR = PLOT_DIR / "first_appearance_all_stations"
 
 for d in [
     OUTPUT_DIR,
@@ -39,6 +40,7 @@ for d in [
     SWE_SCATTER_DIR,
     FIRST_APP_SUMMARY_DIR,
     FIRST_APP_SEASON_DIR,
+    FIRST_APP_ALL_STATIONS_DIR,
 ]:
     d.mkdir(parents=True, exist_ok=True)
 
@@ -597,6 +599,105 @@ def save_first_appearance_by_season_plots(
         plt.close(fig)
 
 
+def save_first_appearance_all_stations_plot(
+    file_table: pd.DataFrame,
+    out_file: Path,
+    center_stat: str = "mean",
+    error_stat: str = "std",
+    errorevery: int = 7,
+) -> pd.DataFrame:
+    ds_cum_list: list[pd.DataFrame] = []
+    hs2_cum_list: list[pd.DataFrame] = []
+
+    for row in file_table.itertuples(index=False):
+        ds = xr.open_dataset(row.dsnow_file)
+        hs2 = xr.open_dataset(row.hs2swe_file)
+
+        try:
+            hs_ds_layers = ds["HS"]
+            hs_hs2_layers = hs2["HS_layer_cm"]
+
+            ev_ds = first_appearance_events(hs_ds_layers, scale_to_m=1.0)
+            ev_hs2 = first_appearance_events(hs_hs2_layers, scale_to_m=0.01)
+
+            season_vals = np.intersect1d(ds["season"].values, hs2["season"].values).astype(int)
+            dos_vals = np.intersect1d(ds["dos"].values, hs2["dos"].values).astype(int)
+
+            if len(season_vals) == 0 or len(dos_vals) == 0:
+                continue
+
+            cum_ds = cumulative_matrix_from_events(ev_ds, season_vals, dos_vals)
+            cum_hs2 = cumulative_matrix_from_events(ev_hs2, season_vals, dos_vals)
+
+            cum_ds.columns = [f"{row.station}_{int(s)}" for s in cum_ds.columns]
+            cum_hs2.columns = [f"{row.station}_{int(s)}" for s in cum_hs2.columns]
+
+            ds_cum_list.append(cum_ds)
+            hs2_cum_list.append(cum_hs2)
+
+        finally:
+            ds.close()
+            hs2.close()
+
+    if not ds_cum_list or not hs2_cum_list:
+        raise RuntimeError("No valid first-appearance data available for all-station plot.")
+
+    all_cum_ds = pd.concat(ds_cum_list, axis=1, join="outer").sort_index()
+    all_cum_hs2 = pd.concat(hs2_cum_list, axis=1, join="outer").sort_index()
+
+    stats_ds = curve_stats(all_cum_ds)
+    stats_hs2 = curve_stats(all_cum_hs2)
+
+    summary = pd.DataFrame(
+        {
+            "delta-snow": final_summary(all_cum_ds.fillna(method="ffill").fillna(0.0)),
+            "hs2swe": final_summary(all_cum_hs2.fillna(method="ffill").fillna(0.0)),
+        }
+    ).T
+
+    dos_vals = stats_ds.index.to_numpy(dtype=int)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    for stats, color, label in [
+        (stats_ds, "C0", "delta-snow"),
+        (stats_hs2, "C1", "hs2swe"),
+    ]:
+        center = stats[center_stat]
+
+        if error_stat == "std":
+            yerr = stats["std"].to_numpy()
+        else:
+            yerr = np.vstack([
+                (center - stats["q25"]).to_numpy(),
+                (stats["q75"] - center).to_numpy(),
+            ])
+
+        ax.plot(dos_vals, center.to_numpy(), color=color, lw=2, label=f"{label} {center_stat}")
+        ax.errorbar(
+            dos_vals,
+            center.to_numpy(),
+            yerr=yerr,
+            fmt="none",
+            ecolor=color,
+            alpha=0.35,
+            elinewidth=1,
+            capsize=2,
+            errorevery=errorevery,
+        )
+
+    ax.set_title("All stations: Cumulative first-appearance HS across all seasons")
+    ax.set_xlabel("DOS")
+    ax.set_ylabel("Cumulative HS [m]")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    fig.savefig(out_file, dpi=200)
+    plt.close(fig)
+
+    return summary
+
+
 # ============================================================================
 # PER-STATION PROCESSING
 # ============================================================================
@@ -749,6 +850,14 @@ def main() -> None:
     summary_df = pd.DataFrame(results)
     summary_csv = OUTPUT_DIR / "station_comparison_summary.csv"
     summary_df.to_csv(summary_csv, index=False)
+
+    all_station_first_app_summary = save_first_appearance_all_stations_plot(
+        file_table=file_table,
+        out_file=FIRST_APP_ALL_STATIONS_DIR / "all_stations_first_appearance_summary.png",
+    )
+    all_station_first_app_summary.to_csv(
+        OUTPUT_DIR / "all_stations_first_appearance_summary_stats.csv"
+    )
 
     print("\nBatch processing finished.")
     print(f"Summary written to: {summary_csv}")

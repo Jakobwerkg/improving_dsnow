@@ -58,25 +58,32 @@ def _plot_validation(x, y, stats, model_name, lim, xlabel, ylabel):
     Generic validation density plot.
     """
 
+    vmax = max(1, len(x) / 10)
+
     plt.figure(figsize=(8, 7))
 
     plt.hist2d(
         x, y,
         bins=50,
         range=[lim, lim],
-        norm=LogNorm(vmin=1, vmax=1000),
-        cmap="jet"
+        norm=LogNorm(vmin=1, vmax=vmax),
+        cmap="viridis"
     )
 
     cb = plt.colorbar(label="Number of observations")
-    cb.set_ticks([1, 10, 100, 1000])
-    cb.set_ticklabels(["1", "10", "100", ">999"])
+
+    ticks = [t for t in [1, 10, 100, 1000, 10000] if t <= vmax]
+    if vmax not in ticks:
+        ticks.append(vmax)
+
+    cb.set_ticks(ticks)
+    cb.set_ticklabels([f"{int(t)}" for t in ticks[:-1]] + [f"{int(vmax)}"])
 
     plt.plot(lim, lim, "--", color="gray", linewidth=1.3)
 
-    ticks = np.linspace(lim[0], lim[1], 5)
-    plt.xticks(ticks)
-    plt.yticks(ticks)
+    ticks_xy = np.linspace(lim[0], lim[1], 5)
+    plt.xticks(ticks_xy)
+    plt.yticks(ticks_xy)
 
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
@@ -110,7 +117,10 @@ def validate_hnw_mag25(df,
                        mod_col="HNW_mod",
                        save_dir=None,
                        filename="hnw_validation.png",
-                       full_season=False):
+                       full_season=False,
+                       drop_weisfluh_joch=True, ax=None):
+    if drop_weisfluh_joch:
+        df = df[df["station"] != "Weisfluh_Joch"].copy()
 
     df = _filter_season(df, full_season)
 
@@ -161,11 +171,17 @@ def validate_swe_mag25(df,
                        mod_col="SWE_mod",
                        save_dir=None,
                        filename="swe_validation.png",
-                       full_season=False):
+                       full_season=False,
+                       drop_weisfluh_joch=True):
+    
+
+    if drop_weisfluh_joch:
+        df = df[df["station"] != "Weisfluh_Joch"].copy()
 
     df = _filter_season(df, full_season)
 
     df_valid = df.dropna(subset=[obs_col, mod_col])
+
     df_valid = df_valid[df_valid[obs_col] >= 0]
 
     print(f"Number of valid observations after filtering: {len(df_valid)}")
@@ -202,3 +218,4 @@ def validate_swe_mag25(df,
     plt.show()
 
     return stats
+

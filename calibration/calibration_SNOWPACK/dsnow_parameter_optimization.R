@@ -3,9 +3,14 @@
 ##############################################################################
 #
 # Objective:
-#   final_score = 0.5 * RMSE(SWE) + 0.5 * RMSE(bulk density)
+#   final_score = w1 * NRMSE_SWE + w2 * NRMSE_rho + w3 * NBIAS_SWE
 #
-# bulk density = SWE / HS
+# where:
+#   NRMSE_SWE  = RMSE_SWE  / mean_obs_SWE
+#   NRMSE_rho  = RMSE_rho  / mean_obs_rho
+#   NBIAS_SWE  = |bias_SWE| / mean_obs_SWE
+#
+# Weights (w1, w2, w3) can be set below.
 #
 ##############################################################################
 
@@ -17,26 +22,46 @@ library(lubridate)
 library(nixmass)
 library(tidyverse)
 
-##############################################################################
-# SETTINGS
-##############################################################################
+# ----------------------------------------------------------------------------
+# CONFIGURATION (USER-ADJUSTABLE)
+# ----------------------------------------------------------------------------
 
-season_start   <- "-08-01"
-season_end     <- "-07-31"
-start_of_block <- 8
+# Weights for the combined objective (should sum to 1)
+WEIGHT_SWE_NRMSE  <- 1.0    # weight for normalized SWE RMSE
+WEIGHT_RHO_NRMSE  <- 0.0    # weight for normalized density RMSE
+WEIGHT_SWE_NBIAS  <- 0.0    # weight for normalized SWE absolute bias
 
-##############################################################################
-# LOAD DATA
-##############################################################################
+# Override weights from command-line: Rscript script.R <w_swe> <w_rho> <w_bias>
+.args <- commandArgs(trailingOnly = TRUE)
+if (length(.args) == 3) {
+  WEIGHT_SWE_NRMSE <- as.numeric(.args[1])
+  WEIGHT_RHO_NRMSE <- as.numeric(.args[2])
+  WEIGHT_SWE_NBIAS <- as.numeric(.args[3])
+}
+cat(sprintf("Weights: SWE_NRMSE=%.3f  RHO_NRMSE=%.3f  SWE_NBIAS=%.3f\n",
+            WEIGHT_SWE_NRMSE, WEIGHT_RHO_NRMSE, WEIGHT_SWE_NBIAS))
 
+# Data settings
+season_start   <- "-08-01"       # start of hydrological year (month-day)
+season_end     <- "-07-31"       # end of hydrological year
+start_of_block <- 8              # month number for block assignment
+
+# Model settings
+EPS <- 1e-6                      # threshold for snow depth in density calculation
+
+# ----------------------------------------------------------------------------
+# LOAD OBSERVATIONAL DATA
+# ----------------------------------------------------------------------------
+# Adjust the path to your .rda file containing a list of zoo objects named 'd_obs'
 d_obs <- get(load(
   "/Users/jakobwerkgarner/code/mt_dsnow/calibration/calibration_SNOWPACK/data/d_obs_SNOWPACK.rda"
 ))
 
-##############################################################################
+# ----------------------------------------------------------------------------
 # HELPER FUNCTIONS
-##############################################################################
+# ----------------------------------------------------------------------------
 
+#' Assign a hydrological season (year) to a date
 set_season <- function(date, start_month = 8) {
   date <- as.Date(date)
   yr <- year(date)
@@ -44,54 +69,94 @@ set_season <- function(date, start_month = 8) {
   ifelse(mo < start_month, yr - 1, yr)
 }
 
+#' Root Mean Square Error
 rmse <- function(obs, mod) {
   ok <- is.finite(obs) & is.finite(mod)
   if (!any(ok)) return(NA_real_)
   sqrt(mean((mod[ok] - obs[ok])^2))
 }
 
-combined_rmse <- function(df, eps = 1e-6) {
-  rmse_swe <- rmse(df$swe_obs, df$swe_mod)
-
-  rho_obs <- ifelse(is.finite(df$hs) & df$hs > eps, df$swe_obs / df$hs, NA_real_)
-  rho_mod <- ifelse(is.finite(df$hs) & df$hs > eps, df$swe_mod / df$hs, NA_real_)
-
-  rmse_rho <- rmse(rho_obs, rho_mod)
-
-  0.5 * rmse_swe + 0.5 * rmse_rho
+#' Normalized RMSE
+nrmse <- function(obs, mod) {
+  ok <- is.finite(obs) & is.finite(mod)
+  if (!any(ok)) return(NA_real_)
+  rmse_val <- sqrt(mean((mod[ok] - obs[ok])^2))
+  mean_obs <- mean(obs[ok], na.rm = TRUE)
+  rmse_val / mean_obs
 }
 
-##############################################################################
-# SPLIT DATA INTO FIT AND VALIDATION
-##############################################################################
+#' Normalized Absolute Bias
+nbias <- function(obs, mod) {
+  ok <- is.finite(obs) & is.finite(mod)
+  if (!any(ok)) return(NA_real_)
+  bias_val <- mean(mod[ok] - obs[ok], na.rm = TRUE)
+  mean_obs <- mean(obs[ok], na.rm = TRUE)
+  abs(bias_val) / mean_obs
+}
 
+#' Combined score: weighted sum of NRMSE_SWE, NRMSE_rho, and NBIAS_SWE
+combined_score <- function(df, eps = EPS) {
+  swe_obs <- df$swe_obs
+  swe_mod <- df$swe_mod
+  hs <- df$hs
+  
+  # SWE metrics
+  nrmse_swe <- nrmse(swe_obs, swe_mod)
+  nbias_swe <- nbias(swe_obs, swe_mod)
+  
+  # Bulk density metrics (only where snow depth > eps)
+  rho_obs <- ifelse(is.finite(hs) & hs > eps, swe_obs / hs, NA_real_)
+  rho_mod <- ifelse(is.finite(hs) & hs > eps, swe_mod / hs, NA_real_)
+  nrmse_rho <- nrmse(rho_obs, rho_mod)
+  
+  # Weighted combination
+  score <- WEIGHT_SWE_NRMSE * nrmse_swe +
+           WEIGHT_RHO_NRMSE * nrmse_rho +
+           WEIGHT_SWE_NBIAS * nbias_swe
+  
+  # Attach detailed metrics for verbose printing
+  attr(score, "metrics") <- list(
+    rmse_swe  = rmse(swe_obs, swe_mod),
+    rmse_rho  = rmse(rho_obs, rho_mod),
+    nrmse_swe = nrmse_swe,
+    nrmse_rho = nrmse_rho,
+    bias_swe  = mean(swe_mod - swe_obs, na.rm = TRUE),
+    nbias_swe = nbias_swe,
+    mean_swe  = mean(swe_obs[is.finite(swe_obs) & is.finite(swe_mod)], na.rm = TRUE),
+    mean_rho  = mean(rho_obs[is.finite(rho_obs) & is.finite(rho_mod)], na.rm = TRUE)
+  )
+  
+  return(score)
+}
+
+# ----------------------------------------------------------------------------
+# SPLIT DATA INTO FIT AND VALIDATION (even/odd years per station)
+# ----------------------------------------------------------------------------
 d_obs_fit <- list()
 d_obs_val <- list()
 
 for (station in names(d_obs)) {
-
   cat("Processing station:", station, "\n")
-
+  
   d <- d_obs[[station]]
   years <- unique(year(index(d)))
-
+  
   fit_list <- list()
   val_list <- list()
   counter <- 1
-
+  
   for (y in years[1:(length(years) - 1)]) {
-
     winter <- subset(
       d,
       index(d) >= as.Date(paste0(y, season_start)) &
         index(d) < as.Date(paste0(y + 1, season_end)) + 1
     )
-
+    
     if (nrow(winter) < 200) {
       cat("  skipping year", y, "- only", nrow(winter), "values\n")
       next
     }
-
+    
     if (
       nrow(winter) < 365 &&
       (as.numeric(winter$Hobs[1]) > 0.05 ||
@@ -100,44 +165,40 @@ for (station in names(d_obs)) {
       cat("  skipping year", y, "- incomplete winter with snow at edge\n")
       next
     }
-
+    
     if (counter %% 2 == 0) {
       fit_list[[length(fit_list) + 1]] <- winter
     } else {
       val_list[[length(val_list) + 1]] <- winter
     }
-
     counter <- counter + 1
   }
-
+  
   d_obs_fit[[station]] <- if (length(fit_list) > 0) do.call(rbind, fit_list) else NULL
   d_obs_val[[station]] <- if (length(val_list) > 0) do.call(rbind, val_list) else NULL
 }
 
-##############################################################################
-# PREPARE FIT DATA
-##############################################################################
-
+# ----------------------------------------------------------------------------
+# PREPARE FIT DATA (convert zoo to tibble)
+# ----------------------------------------------------------------------------
 fit_data_list <- list()
 
 for (station in names(d_obs_fit)) {
-
   x <- d_obs_fit[[station]]
-
   if (is.null(x) || length(x) == 0) next
-
+  
   dat <- tryCatch(as_tibble(coredata(x)), error = function(e) NULL)
   if (is.null(dat) || ncol(dat) == 0) next
-
+  
   if (ncol(dat) == 2 && all(is.na(colnames(dat)))) {
     colnames(dat) <- c("Hobs", "SWEobs")
   }
-
+  
   if (!all(c("Hobs", "SWEobs") %in% colnames(dat))) {
     cat("Skipping station", station, "- missing Hobs or SWEobs\n")
     next
   }
-
+  
   fit_data_list[[station]] <- tibble(
     date    = as.Date(index(x)),
     name    = station,
@@ -149,166 +210,246 @@ for (station in names(d_obs_fit)) {
 
 d_obs_fit_tibble <- bind_rows(fit_data_list)
 
-##############################################################################
-# OBJECTIVE FUNCTION
-##############################################################################
-
+# ----------------------------------------------------------------------------
+# OBJECTIVE FUNCTION (called by optimx)
+# ----------------------------------------------------------------------------
 minimize_score <- function(par, data, scale, verbose = FALSE) {
-
-  par_real <- par * scale
-
-  cat("pars =", paste(round(par_real, 6), collapse = ", "), "\n")
-
-  station_results <- foreach(
-    station = unique(data$name),
-    .packages = c("dplyr", "tidyr", "nixmass")
-  ) %dopar% {
-
-    if (verbose) cat("station:", station, "\n")
-
-    data_station <- data %>% filter(name == station)
-    blocks <- unique(data_station$block)
-
-    block_results <- lapply(blocks, function(b) {
-
-      df_block <- data_station %>% filter(block == b)
-
-      full_dates <- tibble(
-        date = seq(min(df_block$date), max(df_block$date), by = "1 day")
+  
+  # Ensure a scalar numeric is returned even on error
+  result <- tryCatch({
+    
+    par_real <- par * scale
+    if (verbose) {
+      param_names <- names(par_real)
+      if (is.null(param_names)) {
+        param_names <- paste0("p", seq_along(par_real))
+      }
+      scaled_values <- paste(
+        paste0(param_names, "=", round(par, 6)),
+        collapse = ", "
       )
-
-      joined <- df_block %>%
-        select(date, hs, swe_obs) %>%
-        right_join(full_dates, by = "date") %>%
-        arrange(date)
-
-      swe_mod <- tryCatch(
-        {
-          joined %>%
-            select(date, hs) %>%
-            mutate(date = as.character(date)) %>%
-            nixmass::swe.delta.snow(
-              model_opts = list(
-                rho.max  = par_real[1],
-                rho.null = par_real[2],
-                c.ov     = par_real[3],
-                k.ov     = par_real[4],
-                k        = par_real[5],
-                tau      = par_real[6],
-                eta.null = par_real[7]
-              ),
-              dyn_rho_max = FALSE
-            )
-        },
-        error = function(e) rep(NA_real_, nrow(joined))
+      unscaled_values <- paste(
+        paste0(param_names, "=", round(par_real, 6)),
+        collapse = ", "
       )
-
-      joined %>%
-        mutate(swe_mod = swe_mod) %>%
-        drop_na()
-    })
-
-    bind_rows(block_results)
-  }
-
-  dff <- bind_rows(station_results)
-
-  if (nrow(dff) == 0) {
-    cat("No valid model output. Returning large penalty.\n")
+      cat("scaled   =", scaled_values, "\n")
+      cat("unscaled =", unscaled_values, "\n")
+    }
+    
+    # Run model for all stations and blocks in parallel
+    station_results <- foreach(
+      station = unique(data$name),
+      .packages = c("dplyr", "tidyr", "nixmass"),
+      .combine = bind_rows
+    ) %dopar% {
+      
+      data_station <- data %>% filter(name == station)
+      blocks <- unique(data_station$block)
+      
+      block_results <- lapply(blocks, function(b) {
+        df_block <- data_station %>% filter(block == b)
+        
+        full_dates <- tibble(
+          date = seq(min(df_block$date), max(df_block$date), by = "1 day")
+        )
+        
+        joined <- df_block %>%
+          select(date, hs, swe_obs) %>%
+          right_join(full_dates, by = "date") %>%
+          arrange(date)
+        
+        swe_mod <- tryCatch(
+          {
+            joined %>%
+              select(date, hs) %>%
+              mutate(date = as.character(date)) %>%
+              nixmass::swe.delta.snow(
+                model_opts = list(
+                  rho.max  = par_real[1],
+                  rho.null = par_real[2],
+                  c.ov     = par_real[3],
+                  k.ov     = par_real[4],
+                  k        = par_real[5],
+                  tau      = par_real[6],
+                  eta.null = par_real[7]
+                ),
+                dyn_rho_max = FALSE
+              )
+          },
+          error = function(e) rep(NA_real_, nrow(joined))
+        )
+        
+        joined %>%
+          mutate(swe_mod = swe_mod) %>%
+          drop_na()
+      })
+      
+      bind_rows(block_results)
+    }
+    
+    dff <- station_results
+    
+    if (nrow(dff) == 0) {
+      cat("No valid model output. Returning large penalty.\n")
+      return(1e12)
+    }
+    
+    score_with_attr <- combined_score(dff)
+    metrics <- attr(score_with_attr, "metrics")
+    score <- as.numeric(score_with_attr)   # strip attributes for optimx
+    
+    if (!is.finite(score)) {
+      cat("Score is not finite. Returning large penalty.\n")
+      return(1e12)
+    }
+    
+    # Verbose output
+    if (verbose && !is.null(metrics)) {
+      cat(
+        "| bias_swe =", round(metrics$bias_swe, 4),
+        "| RMSE_SWE =", round(metrics$rmse_swe, 4),
+        "| NRMSE_SWE =", round(metrics$nrmse_swe, 4),
+        "| NBIAS_SWE =", round(metrics$nbias_swe, 4),
+        "| RMSE_rho =", round(metrics$rmse_rho, 4),
+        "| NRMSE_rho =", round(metrics$nrmse_rho, 4),
+        "| final_score =", round(score, 4),
+        "\n"
+      )
+    } else {
+      cat("Score =", round(score, 4), "\n")
+    }
+    
+    return(score)
+    
+  }, error = function(e) {
+    cat("Error in objective function:", e$message, "\n")
+    return(1e12)
+  })
+  
+  # Final safeguard
+  if (length(result) != 1 || !is.numeric(result)) {
     return(1e12)
   }
-
-  score <- combined_rmse(dff)
-
-  if (!is.finite(score)) {
-    cat("Score is not finite. Returning large penalty.\n")
-    return(1e12)
-  }
-
-  rmse_swe <- rmse(dff$swe_obs, dff$swe_mod)
-
-  rho_obs <- ifelse(dff$hs > 1e-6, dff$swe_obs / dff$hs, NA_real_)
-  rho_mod <- ifelse(dff$hs > 1e-6, dff$swe_mod / dff$hs, NA_real_)
-  rmse_rho <- rmse(rho_obs, rho_mod)
-
-  bias_swe <- mean(dff$swe_mod - dff$swe_obs, na.rm = TRUE)
-
-  cat(
-    "| bias_swe =", round(bias_swe, 4),
-    "| rmse_swe =", round(rmse_swe, 4),
-    "| rmse_density =", round(rmse_rho, 4),
-    "| final_score =", round(score, 4),
-    "\n"
-  )
-
-  score
+  return(result)
 }
 
-##############################################################################
+# ----------------------------------------------------------------------------
 # START VALUES AND SCALING
-##############################################################################
-
+# ----------------------------------------------------------------------------
 par_delta <- c(
-  rho.max  = 396.9521,
-  rho.null = 78.88324,
-  c.ov     = 0.0004986025,
-  k.ov     = 0.227786,
-  k        = 0.0290256,
-  tau      = 0.02489556,
-  eta.null = 8792253
+  rho.max  = 401.2588,
+  rho.null = 81.19417,
+  c.ov     = 0.0005104722,
+  k.ov     = 0.37856737,
+  k        = 0.02993175,
+  tau      = 0.02362476,
+  eta.null = 8523356
 )
 
 par_scale <- c(1000, 1000, 0.001, 1, 0.1, 0.1, 1e7)
-
 par_start <- par_delta / par_scale
 
+cat("\nStarting parameters (scaled):\n")
 print(par_start)
+cat("\nStarting parameters (unscaled):\n")
+print(par_start * par_scale)
 
-##############################################################################
+# ----------------------------------------------------------------------------
 # PARALLEL SETUP
-##############################################################################
-
+# ----------------------------------------------------------------------------
 nc <- parallel::detectCores(logical = TRUE) - 1
 nc <- max(1, nc)
-
 cl <- parallel::makeCluster(nc)
 doParallel::registerDoParallel(cl)
 
-##############################################################################
+# ----------------------------------------------------------------------------
 # TEST OBJECTIVE FUNCTION ON START VALUES
-##############################################################################
-
+# ----------------------------------------------------------------------------
+cat("\nTesting objective function at start values...\n")
 test_score <- minimize_score(
-  par   = par_start,
-  data  = d_obs_fit_tibble,
-  scale = par_scale,
-  verbose = FALSE
+  par     = par_start,
+  data    = d_obs_fit_tibble,
+  scale   = par_scale,
+  verbose = TRUE
 )
-
 cat("Initial score =", test_score, "\n")
 
-##############################################################################
+# ----------------------------------------------------------------------------
 # OPTIMIZATION
-##############################################################################
-
+# ----------------------------------------------------------------------------
+cat("\nStarting optimization...\n")
 opt <- optimx(
   par     = par_start,
   fn      = minimize_score,
   data    = d_obs_fit_tibble,
   scale   = par_scale,
-  verbose = FALSE,
+  verbose = TRUE,
   method  = "Nelder-Mead",
-  control = list(trace = 1, maxit = 500)
+  control = list(trace = 1, maxit = 200)
 )
 
-##############################################################################
+# Print final parameters as Python pydeltasnow call (unscaled)
+opt_df <- as.data.frame(opt)
+best_idx <- which.min(opt_df$value)
+best_scaled <- as.numeric(opt_df[best_idx, names(par_start), drop = TRUE])
+names(best_scaled) <- names(par_start)
+best_unscaled <- best_scaled * par_scale
+
+fmt <- function(x) format(x, scientific = FALSE, trim = TRUE, digits = 10)
+
+cat(
+  "\nswe_results = pydeltasnow.swe_deltasnow(\n",
+  "    idata,\n",
+  "    rho_max   = ", fmt(best_unscaled["rho.max"]), ",\n",
+  "    rho_null  = ", fmt(best_unscaled["rho.null"]), ",\n",
+  "    c_ov      = ", fmt(best_unscaled["c.ov"]), ",\n",
+  "    k_ov      = ", fmt(best_unscaled["k.ov"]), ",\n",
+  "    k         = ", fmt(best_unscaled["k"]), ",\n",
+  "    tau       = ", fmt(best_unscaled["tau"]), ",\n",
+  "    eta_null  = ", fmt(best_unscaled["eta.null"]), ",\n",
+  "    hs_input_unit=\"m\",\n",
+  "    swe_output_unit=\"mm\",\n",
+  "    output_series_name=\"SWE_mod\"\n",
+  ")\n",
+  sep = ""
+)
+
+
+# ----------------------------------------------------------------------------
 # SAVE RESULTS
-##############################################################################
+# ----------------------------------------------------------------------------
 
-saveRDS(opt, file = "opt_results_combined_rmse_nelder.rds")
+make_weight_tag <- function(x) {
+  out <- format(x, scientific = FALSE, trim = TRUE, digits = 6)
+  out <- gsub("\\.", "p", out)
+  out <- gsub("-", "m", out)
+  out
+}
 
-##############################################################################
+weight_vals <- c(
+  SWE_NRMSE = WEIGHT_SWE_NRMSE,
+  RHO_NRMSE = WEIGHT_RHO_NRMSE,
+  SWE_NBIAS = WEIGHT_SWE_NBIAS
+)
+
+weight_tag <- paste0(
+  names(weight_vals), "_", make_weight_tag(weight_vals),
+  collapse = "__"
+)
+
+save_dir <- "/Users/jakobwerkgarner/code/mt_dsnow/calibration/calibration_SNOWPACK/data/R_opt_logs"
+dir.create(save_dir, recursive = TRUE, showWarnings = FALSE)
+
+save_file <- file.path(
+  save_dir,
+  paste0("opt_results__", weight_tag, ".rds")
+)
+
+saveRDS(opt, file = save_file)
+
+cat("\nOptimization finished. Results saved to:\n", save_file, "\n", sep = "")
+
+# ----------------------------------------------------------------------------
 # STOP CLUSTER
-##############################################################################
-
+# ----------------------------------------------------------------------------
 parallel::stopCluster(cl)

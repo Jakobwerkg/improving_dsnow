@@ -171,5 +171,7 @@ def HS2SWE(idata, RhoNew=113.7, RhoMax=571.6, SnoTemp=-0.000, Visc=6.051e7, DQMu
     if timekeeping:
         end=time.time()
         print(f"Average time per station: {(end - start)/idata.shape[1]} s")
+
+    
         
-    return odata
+    return odata, MR
