@@ -29,7 +29,7 @@ run_phase "Phase 1 — SWE-only baseline"          1.0 0.0 0.0
 # ------------------------------------------------------------
 # PHASE 2 — Density-only extreme (w = 0 / 1 / 0)
 # ------------------------------------------------------------
-run_phase "Phase 2 — Density-only extreme"        0.0 1.0 0.0
+#run_phase "Phase 2 — Density-only extreme"        0.0 1.0 0.0
 
 # ------------------------------------------------------------
 # PHASE 3 — Balanced weight sweep (no bias)

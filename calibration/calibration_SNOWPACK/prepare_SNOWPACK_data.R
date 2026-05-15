@@ -3,7 +3,7 @@ library(zoo)
 base_dir <- "/Users/jakobwerkgarner/code/mt_dsnow"
 
 # Input from SNOWPACK_data
-indir <- file.path(base_dir, "par_sens/SNOWPACK_data")
+indir <- file.path(base_dir, "par_sens/SNOWPACK_data/data<2000m/raw_alpsolut")
 
 # Output (change if you want)
 out_dir <- file.path(
