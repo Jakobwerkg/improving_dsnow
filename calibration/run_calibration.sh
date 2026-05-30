@@ -21,12 +21,12 @@ echo "  DeltaSnow calibration  |  SWE=$W1  RHO=$W2  BIAS=$W3"
 echo "========================================================"
 
 echo ""
-echo "[1/4] SNOWPACK — Nelder-Mead"
+echo "[1/2] SNOWPACK — Nelder-Mead"
 Rscript "$BASE/calibration_SNOWPACK/dsnow_parameter_optimization.R" "$W1" "$W2" "$W3"
 
 echo ""
-echo "[2/4] SNOWPACK — Differential Evolution"
-#Rscript "$BASE/calibration_SNOWPACK/dsnow_parameter_optimization_DE.R" "$W1" "$W2" "$W3"
+echo "[2/2] SNOWPACK — Differential Evolution"
+Rscript "$BASE/calibration_SNOWPACK/dsnow_parameter_optimization_DE.R" "$W1" "$W2" "$W3"
 
 # echo ""
 # echo "[3/4] Win21 — Nelder-Mead"
@@ -38,9 +38,8 @@ echo "[2/4] SNOWPACK — Differential Evolution"
 
 echo ""
 echo "========================================================"
-echo "  All 4 calibrations complete."
+echo "  All 2 calibrations complete."
 echo "  Results saved to:"
 echo "    calibration_SNOWPACK/data/R_opt_logs/"
-echo "    calibration_SNOWPACK/data/R_opt_logs_DE/"
-#echo "    calibration_Win21/data/R_opt_logs/"
+echo "    calibration_SNOWPACK/data/R_opt_logs_DE/"2
 echo "========================================================"

@@ -32,8 +32,10 @@ WEIGHT_RHO_NRMSE  <- 0.8    # weight for normalized density RMSE
 WEIGHT_SWE_NBIAS  <- 0.0    # weight for normalized SWE absolute bias
 
 # Override weights from command-line: Rscript script.R <w_swe> <w_rho> <w_bias>
+# Override weights and itermax from command-line:
+#   Rscript script.R <w_swe> <w_rho> <w_bias> [itermax]
 .args <- commandArgs(trailingOnly = TRUE)
-if (length(.args) == 3) {
+if (length(.args) >= 3) {
   WEIGHT_SWE_NRMSE <- as.numeric(.args[1])
   WEIGHT_RHO_NRMSE <- as.numeric(.args[2])
   WEIGHT_SWE_NBIAS <- as.numeric(.args[3])
@@ -51,6 +53,7 @@ EPS <- 1e-6                      # threshold for snow depth in density calculati
 
 # DE settings
 DE_ITERMAX   <- 100              # maximum number of DE iterations
+if (length(.args) >= 4) DE_ITERMAX <- as.integer(.args[4])
 DE_NP        <- 70               # population size (rule of thumb: 10 * n_params)
 DE_F         <- 0.8              # differential weight
 DE_CR        <- 0.9              # crossover probability
@@ -216,6 +219,38 @@ for (station in names(d_obs_fit)) {
 }
 
 d_obs_fit_tibble <- bind_rows(fit_data_list)
+
+# ----------------------------------------------------------------------------
+# PREPARE VAL DATA (convert zoo to tibble)
+# ----------------------------------------------------------------------------
+val_data_list <- list()
+
+for (station in names(d_obs_val)) {
+  x <- d_obs_val[[station]]
+  if (is.null(x) || length(x) == 0) next
+
+  dat <- tryCatch(as_tibble(coredata(x)), error = function(e) NULL)
+  if (is.null(dat) || ncol(dat) == 0) next
+
+  if (ncol(dat) == 2 && all(is.na(colnames(dat)))) {
+    colnames(dat) <- c("Hobs", "SWEobs")
+  }
+
+  if (!all(c("Hobs", "SWEobs") %in% colnames(dat))) {
+    cat("Skipping val station", station, "- missing Hobs or SWEobs\n")
+    next
+  }
+
+  val_data_list[[station]] <- tibble(
+    date    = as.Date(index(x)),
+    name    = station,
+    hs      = dat$Hobs,
+    swe_obs = dat$SWEobs,
+    block   = set_season(index(x), start_of_block)
+  )
+}
+
+d_obs_val_tibble <- bind_rows(val_data_list)
 
 # ----------------------------------------------------------------------------
 # OBJECTIVE FUNCTION (called by DEoptim)
@@ -439,7 +474,6 @@ fmt <- function(x) format(x, scientific = FALSE, trim = TRUE, digits = 10)
 
 cat(
   "\nswe_results = pydeltasnow.swe_deltasnow(\n",
-  "    idata,\n",
   "    rho_max   = ", fmt(best_par["rho.max"]), ",\n",
   "    rho_null  = ", fmt(best_par["rho.null"]), ",\n",
   "    c_ov      = ", fmt(best_par["c.ov"]), ",\n",
@@ -447,9 +481,6 @@ cat(
   "    k         = ", fmt(best_par["k"]), ",\n",
   "    tau       = ", fmt(best_par["tau"]), ",\n",
   "    eta_null  = ", fmt(best_par["eta.null"]), ",\n",
-  "    hs_input_unit=\"m\",\n",
-  "    swe_output_unit=\"mm\",\n",
-  "    output_series_name=\"SWE_mod\"\n",
   ")\n",
   sep = ""
 )
@@ -484,7 +515,12 @@ save_file <- file.path(
   paste0("opt_results_DE__", weight_tag, ".rds")
 )
 
-saveRDS(opt, file = save_file)
+saveRDS(list(
+  opt          = opt,
+  fit_data     = d_obs_fit_tibble,
+  val_data     = d_obs_val_tibble
+), file = save_file)
+
 
 cat("\nOptimization finished. Results saved to:\n", save_file, "\n", sep = "")
 

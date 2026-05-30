@@ -216,6 +216,40 @@ for (station in names(d_obs_fit)) {
 d_obs_fit_tibble <- bind_rows(fit_data_list)
 
 # ----------------------------------------------------------------------------
+# PREPARE VAL DATA (convert zoo to tibble)
+# ----------------------------------------------------------------------------
+val_data_list <- list()
+
+for (station in names(d_obs_val)) {
+  if (station == "Sta.Maria") next
+
+  x <- d_obs_val[[station]]
+  if (is.null(x) || length(x) == 0) next
+
+  dat <- tryCatch(as_tibble(coredata(x)), error = function(e) NULL)
+  if (is.null(dat) || ncol(dat) == 0) next
+
+  if (ncol(dat) == 2 && all(is.na(colnames(dat)))) {
+    colnames(dat) <- c("Hobs", "SWEobs")
+  }
+
+  if (!all(c("Hobs", "SWEobs") %in% colnames(dat))) {
+    cat("Skipping val station", station, "- missing Hobs or SWEobs\n")
+    next
+  }
+
+  val_data_list[[station]] <- tibble(
+    date    = as.Date(index(x)),
+    name    = station,
+    hs      = dat$Hobs / 100,
+    swe_obs = dat$SWEobs,
+    block   = set_season(index(x), start_of_block)
+  )
+}
+
+d_obs_val_tibble <- bind_rows(val_data_list)
+
+# ----------------------------------------------------------------------------
 # OBJECTIVE FUNCTION (called by optimx)
 # ----------------------------------------------------------------------------
 minimize_score <- function(par, data, scale, verbose = FALSE) {
@@ -397,6 +431,12 @@ best_idx <- which.min(opt_df$value)
 best_scaled <- as.numeric(opt_df[best_idx, names(par_start), drop = TRUE])
 names(best_scaled) <- names(par_start)
 best_unscaled <- best_scaled * par_scale
+best_par   <- best_unscaled
+best_value <- opt_df$value[best_idx]
+
+cat("\nBest score:", best_value, "\n")
+cat("Best parameters (unscaled):\n")
+print(best_par)
 
 fmt <- function(x) format(x, scientific = FALSE, trim = TRUE, digits = 10)
 
@@ -439,9 +479,18 @@ weight_tag <- paste0(
 )
 
 # Insert "Win21" into the filename
-save_file <- paste0("/Users/jakobwerkgarner/code/mt_dsnow/calibration/calibration_Win21/data/R_opt_logs/opt_results_Win21__", weight_tag, ".rds")
+save_dir <- "/Users/jakobwerkgarner/code/mt_dsnow/calibration/calibration_Win21/data/R_opt_logs"
+dir.create(save_dir, recursive = TRUE, showWarnings = FALSE)
+save_file <- file.path(save_dir, paste0("opt_results_Win21__", weight_tag, ".rds"))
 
-saveRDS(opt, file = save_file)
+saveRDS(list(
+  opt          = opt,
+  fit_data     = d_obs_fit_tibble,
+  val_data     = d_obs_val_tibble,
+  best_par     = best_par,
+  best_value   = best_value,
+  weights      = weight_vals
+), file = save_file)
 
 cat("\nOptimization finished. Results saved to:\n", save_file, "\n", sep = "")
 

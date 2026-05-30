@@ -20,12 +20,25 @@ suppressPackageStartupMessages({
 # -----------------------------------------------------------
 # Pfade
 # -----------------------------------------------------------
-ROOT     <- "~/code/mt_dsnow/calibration"                     # Startordner fuer die Suche
-OUT_CSV  <- "~/code/mt_dsnow/calibration/opt_results_summary.csv"
-OUT_RDS  <- "~/code/mt_dsnow/calibration/opt_results_summary.rds"
+ROOT     <- "~/code/mt_dsnow/calibration"                     # Startordner fuer die Suche (alle datasets)
+OUT_CSV  <- "~/code/mt_dsnow/calibration/opt_results_all.csv"
+OUT_RDS  <- "~/code/mt_dsnow/calibration/opt_results_all.rds"
 
-ROOT    <- normalizePath(ROOT, mustWork = TRUE)
+ROOT <- normalizePath(ROOT, mustWork = TRUE)
+
+# Verzeichnisse, die NICHT durchsucht werden sollen
+# (relativ zu ROOT - werden gleich normalisiert)
+EXCLUDE_DIRS <- c(
+  file.path(ROOT, "AA_opt_out"),   # Archiv-Snapshot
+  file.path(ROOT, "archieve"),
+  file.path(ROOT, "Archive")
+)
+EXCLUDE_DIRS <- normalizePath(EXCLUDE_DIRS, mustWork = FALSE)
+# Trailing slash, damit "AA_opt_out" nicht zufaellig "AA_opt_out_v2" matched
+EXCLUDE_DIRS <- paste0(sub("/$", "", EXCLUDE_DIRS), "/")
+
 message("Suche unter: ", ROOT)
+message("Ausgeschlossen:\n  ", paste(EXCLUDE_DIRS, collapse = "\n  "))
 
 # -----------------------------------------------------------
 # 1) Alle relevanten Dateien finden
@@ -36,17 +49,27 @@ files <- list.files(
   recursive  = TRUE,
   full.names = TRUE
 )
+files <- normalizePath(files, mustWork = FALSE)
 
-# Archiv-Verzeichnis ausschliessen (enthaelt veraltete Runs)
-files <- files[!grepl("/archieve/", files, ignore.case = TRUE)]
-files <- files[!grepl("/Archive/",  files, ignore.case = TRUE)]
+# Ausschluss per Praefix-Match (robuster als grepl mit Literalpfad)
+in_excluded <- function(p) any(startsWith(p, EXCLUDE_DIRS))
+files <- files[!vapply(files, in_excluded, logical(1))]
 
-message("Gefundene Dateien: ", length(files))
+# Eigene Summary-Datei zusaetzlich raus
+files <- files[!grepl("opt_results_summary", files, fixed = TRUE)]
+
+message("Gefundene Dateien (nach Filter): ", length(files))
 if (length(files) == 0) stop("Keine passenden .rds-Dateien gefunden.")
+
+# Sanity-Check: nichts aus AA_opt_out sollte durchrutschen
+stopifnot(!any(grepl("/AA_opt_out/", files, fixed = TRUE)))
 
 # -----------------------------------------------------------
 # 2) Hilfsfunktionen
 # -----------------------------------------------------------
+
+# `%||%`-Operator (Basis-R kennt ihn erst ab 4.4)
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
 # "0p3" -> 0.3, "0" -> 0, "1" -> 1
 parse_weight <- function(s) {
@@ -112,6 +135,25 @@ extract_summary <- function(obj) {
     if (is.null(p) || length(p) == 0) return(NA_character_)
     if (is.null(names(p))) names(p) <- paste0("p", seq_along(p))
     paste(sprintf("%s=%.6g", names(p), as.numeric(p)), collapse = "; ")
+  }
+
+  # ---- Wrapper list saved by our calibration scripts ----
+  # Structure: list(opt=..., fit_data=..., val_data=..., best_par=..., best_value=..., weights=...)
+  if (is.list(obj) && all(c("best_par", "best_value") %in% names(obj))) {
+    out$best_value <- as.numeric(obj$best_value)
+    out$best_par   <- format_par(obj$best_par)
+    out$n_par      <- length(obj$best_par)
+    # pull iteration count from the inner optimizer object
+    inner <- obj$opt
+    if (inherits(inner, "DEoptim")) {
+      out$iterations  <- as.integer(inner$optim$iter %||% NA)
+      out$convergence <- as.character(inner$optim$nfeval %||% NA)
+    } else if (is.data.frame(inner)) {
+      # optimx returns a data frame
+      out$iterations  <- as.integer(inner$fevals[1] %||% NA)
+      out$convergence <- as.character(inner$convcode[1] %||% NA)
+    }
+    return(out)
   }
 
   # ---- DEoptim ----
@@ -180,9 +222,6 @@ extract_summary <- function(obj) {
 
   out
 }
-
-# `%||%`-Operator (Basis-R kennt ihn erst ab 4.4)
-`%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
 # -----------------------------------------------------------
 # 3) Schleife ueber alle Dateien
